@@ -8,12 +8,15 @@ import carpet.utils.BlockInfo;
 import it.unimi.dsi.fastutil.ints.Int2ObjectMap;
 import it.unimi.dsi.fastutil.ints.Int2ObjectOpenHashMap;
 import net.minecraft.advancements.critereon.MinMaxBounds;
+import net.minecraft.commands.arguments.item.ItemInput;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.GlobalPos;
-import net.minecraft.core.Registry;
 import net.minecraft.core.RegistryAccess;
 import net.minecraft.core.Vec3i;
 import net.minecraft.core.particles.ParticleOptions;
+import net.minecraft.core.registries.BuiltInRegistries;
+import net.minecraft.core.registries.Registries;
+import net.minecraft.nbt.CompoundTag;
 import net.minecraft.resources.ResourceKey;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.MinecraftServer;
@@ -52,6 +55,8 @@ import java.util.function.Predicate;
 import java.util.stream.Collectors;
 import java.util.stream.StreamSupport;
 
+import com.mojang.brigadier.exceptions.CommandSyntaxException;
+
 public class ValueConversions
 {
     public static Value of(BlockPos pos)
@@ -80,7 +85,7 @@ public class ValueConversions
         if (stack == null || stack.isEmpty())
             return Value.NULL;
         return ListValue.of(
-                of(Registry.ITEM.getKey(stack.getItem())),
+                of(BuiltInRegistries.ITEM.getKey(stack.getItem())),
                 new NumericValue(stack.getCount()),
                 NBTSerializableValue.fromStack(stack)
         );
@@ -174,9 +179,7 @@ public class ValueConversions
     {
         if (id == null) // should be Value.NULL
             return Value.NULL;
-        if (id.getNamespace().equals("minecraft"))
-            return new StringValue(id.getPath());
-        return new StringValue(id.toString());
+        return new StringValue(simplify(id));
     }
 
     public static String simplify(ResourceLocation id)
@@ -329,7 +332,7 @@ public class ValueConversions
             if (box.maxX() >= box.minX() && box.maxY() >= box.minY() && box.maxZ() >= box.minZ())
             {
                 pieces.add(ListValue.of(
-                        new StringValue(NBTSerializableValue.nameFromRegistryId(Registry.STRUCTURE_PIECE.getKey(piece.getType()))),
+                        new StringValue(NBTSerializableValue.nameFromRegistryId(BuiltInRegistries.STRUCTURE_PIECE.getKey(piece.getType()))),
                         (piece.getOrientation() == null) ? Value.NULL : new StringValue(piece.getOrientation().getName()),
                         ListValue.fromTriple(box.minX(), box.minY(), box.minZ()),
                         ListValue.fromTriple(box.maxX(), box.maxY(), box.maxZ())
@@ -404,11 +407,60 @@ public class ValueConversions
     {
         BlockPredicateInterface predicateData = (BlockPredicateInterface) blockPredicate;
         return ListValue.of(
-                predicateData.getCMBlockState()==null?Value.NULL:of(Registry.BLOCK.getKey(predicateData.getCMBlockState().getBlock())),
-                predicateData.getCMBlockTagKey()==null?Value.NULL:of(registryAccess.registryOrThrow(Registry.BLOCK_REGISTRY).getTag(predicateData.getCMBlockTagKey()).get().key()),
+                predicateData.getCMBlockState()==null?Value.NULL:of(BuiltInRegistries.BLOCK.getKey(predicateData.getCMBlockState().getBlock())),
+                predicateData.getCMBlockTagKey()==null?Value.NULL:of(registryAccess.registryOrThrow(Registries.BLOCK).getTag(predicateData.getCMBlockTagKey()).get().key()),
                 MapValue.wrap(predicateData.getCMProperties()),
                 predicateData.getCMDataTag() == null?Value.NULL:new NBTSerializableValue(predicateData.getCMDataTag())
         );
+    }
+
+    public static ItemStack getItemStackFromValue(Value value, boolean withCount, RegistryAccess regs)
+    {
+        if (value.isNull())
+        {
+            return ItemStack.EMPTY;
+        }
+        final String name;
+        int count = 1;
+        CompoundTag nbtTag = null;
+        if (value instanceof ListValue list)
+        {
+            if (list.length() != 3)
+            {
+                throw new ThrowStatement("item definition from list of size "+list.length(), Throwables.UNKNOWN_ITEM);
+            }
+            final List<Value> items = list.getItems();
+            name = items.get(0).getString();
+            if (withCount)
+            {
+                count = NumericValue.asNumber(items.get(1)).getInt();
+            }
+            Value nbtValue = items.get(2);
+            if (!nbtValue.isNull())
+            {
+                nbtTag = ((NBTSerializableValue) NBTSerializableValue.fromValue(nbtValue)).getCompoundTag();
+            }
+        }
+        else
+        {
+            name = value.getString();
+        }
+        ItemInput itemInput = NBTSerializableValue.parseItem(name, nbtTag, regs);
+        try
+        {
+            return itemInput.createItemStack(count,false);
+        }
+        catch (CommandSyntaxException cse)
+        {
+            if (!withCount)
+            {
+                throw new IllegalStateException("Unexpected exception while creating item stack of " + name + ". All items should be able to stack to one", cse);
+            }
+            else
+            {
+                throw new ThrowStatement(count + " stack size of " + name, Throwables.UNKNOWN_ITEM);
+            }
+        }
     }
 
     public static Value guess(ServerLevel serverWorld, Object o) {
